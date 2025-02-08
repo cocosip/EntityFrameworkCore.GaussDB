@@ -77,8 +77,16 @@ public class GaussDBTimeTzTypeMapping : GaussDBTypeMapping
     protected override string GenerateEmbeddedNonNullSqlLiteral(object value)
         => FormattableString.Invariant(@$"{(DateTimeOffset)value:HH:mm:ss.FFFFFFz}");
 
-    private sealed class JsonTimeTzReaderWriter : JsonValueReaderWriter<DateTimeOffset>
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public sealed class JsonTimeTzReaderWriter : JsonValueReaderWriter<DateTimeOffset>
     {
+        private static readonly PropertyInfo InstanceProperty = typeof(JsonTimeTzReaderWriter).GetProperty(nameof(Instance))!;
+
         /// <summary>
         ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
         ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
@@ -91,12 +99,25 @@ public class GaussDBTimeTzTypeMapping : GaussDBTypeMapping
         {
         }
 
-        /// <inheritdoc />
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override DateTimeOffset FromJsonTyped(ref Utf8JsonReaderManager manager, object? existingObject = null)
             => DateTimeOffset.Parse(manager.CurrentReader.GetString()!);
 
-        /// <inheritdoc />
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override void ToJsonTyped(Utf8JsonWriter writer, DateTimeOffset value)
             => writer.WriteStringValue(value.ToString("HH:mm:ss.FFFFFFz"));
+
+        /// <inheritdoc />
+        public override Expression ConstructorExpression => Expression.Property(null, InstanceProperty);
     }
 }

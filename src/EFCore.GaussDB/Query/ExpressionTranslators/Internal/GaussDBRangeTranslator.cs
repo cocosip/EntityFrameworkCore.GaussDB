@@ -171,10 +171,10 @@ public class GaussDBRangeTranslator : IMethodCallTranslator, IMemberTranslator
             _ => null
         };
 
-        SqlFunctionExpression SingleArgBoolFunction(string name, SqlExpression argument)
+        SqlExpression SingleArgBoolFunction(string name, SqlExpression argument)
             => _sqlExpressionFactory.Function(
                 name,
-                new[] { argument },
+                [argument],
                 nullable: true,
                 argumentsPropagateNullability: TrueArrays[1],
                 typeof(bool));

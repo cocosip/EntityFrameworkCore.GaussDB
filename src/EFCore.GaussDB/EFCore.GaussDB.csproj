@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net9.0</TargetFramework>
     <AssemblyName>DotNetCore.EntityFrameworkCore.GaussDB</AssemblyName>
     <RootNamespace>DotNetCore.EntityFrameworkCore.GaussDB</RootNamespace>
     <PackageId>DotNetCore.EntityFrameworkCore.GaussDB</PackageId>
@@ -17,7 +17,7 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore" PrivateAssets="none" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" PrivateAssets="none" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Abstractions" PrivateAssets="none" />
-    <PackageReference Include="DotNetCore.GaussDB" />
+    <!--<PackageReference Include="DotNetCore.GaussDB" />-->
   </ItemGroup>
 
   <ItemGroup>
@@ -43,6 +43,10 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\GaussDB\src\GaussDB\GaussDB.csproj" />
   </ItemGroup>
 
 </Project>

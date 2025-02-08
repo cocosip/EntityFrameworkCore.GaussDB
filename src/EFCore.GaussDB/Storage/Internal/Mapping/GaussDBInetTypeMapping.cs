@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text.Json;
-using GaussDBTypes;
 using Microsoft.EntityFrameworkCore.Storage.Json;
 
 namespace GaussDB.EntityFrameworkCore.PostgreSQL.Storage.Internal.Mapping;
@@ -86,25 +85,83 @@ public class GaussDBInetTypeMapping : GaussDBTypeMapping
     private static readonly MethodInfo IPAddressParseMethod = typeof(IPAddress).GetMethod("Parse", new[] { typeof(string) })!;
     private static readonly ConstructorInfo GaussDBInetConstructor = typeof(GaussDBInet).GetConstructor(new[] { typeof(string) })!;
 
-    private sealed class JsonIPAddressReaderWriter : JsonValueReaderWriter<IPAddress>
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public sealed class JsonIPAddressReaderWriter : JsonValueReaderWriter<IPAddress>
     {
+        private static readonly PropertyInfo InstanceProperty = typeof(JsonIPAddressReaderWriter).GetProperty(nameof(Instance))!;
+
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public static JsonIPAddressReaderWriter Instance { get; } = new();
 
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override IPAddress FromJsonTyped(ref Utf8JsonReaderManager manager, object? existingObject = null)
             => IPAddress.Parse(manager.CurrentReader.GetString()!);
 
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override void ToJsonTyped(Utf8JsonWriter writer, IPAddress value)
             => writer.WriteStringValue(value.ToString());
+
+        /// <inheritdoc />
+        public override Expression ConstructorExpression => Expression.Property(null, InstanceProperty);
     }
 
-    private sealed class JsonGaussDBInetReaderWriter : JsonValueReaderWriter<GaussDBInet>
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public sealed class JsonGaussDBInetReaderWriter : JsonValueReaderWriter<GaussDBInet>
     {
+        private static readonly PropertyInfo InstanceProperty = typeof(JsonGaussDBInetReaderWriter).GetProperty(nameof(Instance))!;
+
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public static JsonGaussDBInetReaderWriter Instance { get; } = new();
 
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override GaussDBInet FromJsonTyped(ref Utf8JsonReaderManager manager, object? existingObject = null)
             => new(manager.CurrentReader.GetString()!);
 
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override void ToJsonTyped(Utf8JsonWriter writer, GaussDBInet value)
             => writer.WriteStringValue(value.ToString());
+
+        /// <inheritdoc />
+        public override Expression ConstructorExpression => Expression.Property(null, InstanceProperty);
     }
 }

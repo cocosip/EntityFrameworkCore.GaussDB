@@ -1,6 +1,5 @@
 ﻿using System.Text;
 using System.Text.Json;
-using GaussDBTypes;
 using Microsoft.EntityFrameworkCore.Storage.Json;
 
 namespace GaussDB.EntityFrameworkCore.PostgreSQL.Storage.Internal.Mapping;
@@ -84,18 +83,49 @@ public class GaussDBPgLsnTypeMapping : GaussDBTypeMapping
     private static readonly ConstructorInfo Constructor =
         typeof(GaussDBLogSequenceNumber).GetConstructor(new[] { typeof(ulong) })!;
 
-    private sealed class JsonLogSequenceNumberReaderWriter : JsonValueReaderWriter<GaussDBLogSequenceNumber>
+
+
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public sealed class JsonLogSequenceNumberReaderWriter : JsonValueReaderWriter<GaussDBLogSequenceNumber>
     {
+        private static readonly PropertyInfo InstanceProperty = typeof(JsonLogSequenceNumberReaderWriter).GetProperty(nameof(Instance))!;
+
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public static JsonLogSequenceNumberReaderWriter Instance { get; } = new();
 
         private JsonLogSequenceNumberReaderWriter()
         {
         }
 
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override GaussDBLogSequenceNumber FromJsonTyped(ref Utf8JsonReaderManager manager, object? existingObject = null)
             => GaussDBLogSequenceNumber.Parse(manager.CurrentReader.GetString()!);
 
+        /// <summary>
+        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+        ///     any release. You should only use it directly in your code with extreme caution and knowing that
+        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+        /// </summary>
         public override void ToJsonTyped(Utf8JsonWriter writer, GaussDBLogSequenceNumber value)
             => writer.WriteStringValue(value.ToString());
+
+        /// <inheritdoc />
+        public override Expression ConstructorExpression => Expression.Property(null, InstanceProperty);
     }
 }

@@ -1,4 +1,5 @@
-﻿using GaussDB.EntityFrameworkCore.PostgreSQL.Metadata;
+﻿using DotNetCore.EntityFrameworkCore.GaussDB.ValueGeneration;
+using GaussDB.EntityFrameworkCore.PostgreSQL.Metadata;
 using GaussDB.EntityFrameworkCore.PostgreSQL.Storage.Internal;
 
 namespace GaussDB.EntityFrameworkCore.PostgreSQL.ValueGeneration.Internal;
@@ -49,16 +50,50 @@ public class GaussDBValueGeneratorSelector : RelationalValueGeneratorSelector
     ///     any release. You should only use it directly in your code with extreme caution and knowing that
     ///     doing so can result in application failures when updating to a new Entity Framework Core release.
     /// </summary>
-    public override ValueGenerator Select(IProperty property, ITypeBase typeBase)
-        => property.GetValueGeneratorFactory() is null
-            && property.GetValueGenerationStrategy() == GaussDBValueGenerationStrategy.SequenceHiLo
-                ? _sequenceFactory.Create(
-                    property,
-                    Cache.GetOrAddSequenceState(property, _connection),
-                    _connection,
-                    _rawSqlCommandBuilder,
-                    _commandLogger)
-                : base.Select(property, typeBase);
+    public override bool TrySelect(IProperty property, ITypeBase typeBase, out ValueGenerator? valueGenerator)
+    {
+        if (property.GetValueGeneratorFactory() != null
+            || property.GetValueGenerationStrategy() != GaussDBValueGenerationStrategy.SequenceHiLo)
+        {
+            return base.TrySelect(property, typeBase, out valueGenerator);
+        }
+
+        var propertyType = property.ClrType.UnwrapNullableType().UnwrapEnumType();
+
+        valueGenerator = _sequenceFactory.TryCreate(
+            property,
+            propertyType,
+            Cache.GetOrAddSequenceState(property, _connection),
+            _connection,
+            _rawSqlCommandBuilder,
+            _commandLogger);
+
+        if (valueGenerator != null)
+        {
+            return true;
+        }
+
+        var converter = property.GetTypeMapping().Converter;
+        if (converter != null
+            && converter.ProviderClrType != propertyType)
+        {
+            valueGenerator = _sequenceFactory.TryCreate(
+                property,
+                converter.ProviderClrType,
+                Cache.GetOrAddSequenceState(property, _connection),
+                _connection,
+                _rawSqlCommandBuilder,
+                _commandLogger);
+
+            if (valueGenerator != null)
+            {
+                valueGenerator = valueGenerator.WithConverter(converter);
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
@@ -70,6 +105,6 @@ public class GaussDBValueGeneratorSelector : RelationalValueGeneratorSelector
         => property.ClrType.UnwrapNullableType() == typeof(Guid)
             ? property.ValueGenerated == ValueGenerated.Never || property.GetDefaultValueSql() is not null
                 ? new TemporaryGuidValueGenerator()
-                : new GuidValueGenerator()
+                : new GaussDBSequentialGuidValueGenerator()
             : base.FindForType(property, typeBase, clrType);
 }

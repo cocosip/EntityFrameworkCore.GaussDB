@@ -1,3 +1,5 @@
+using GaussDB.EntityFrameworkCore.PostgreSQL.Infrastructure.Internal;
+
 namespace GaussDB.EntityFrameworkCore.PostgreSQL.Query.Internal;
 
 /// <summary>
@@ -8,6 +10,8 @@ namespace GaussDB.EntityFrameworkCore.PostgreSQL.Query.Internal;
 /// </summary>
 public class GaussDBQueryableMethodTranslatingExpressionVisitorFactory : IQueryableMethodTranslatingExpressionVisitorFactory
 {
+    private readonly IGaussDBSingletonOptions _gaussDBSingletonOptions;
+
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
     ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
@@ -16,10 +20,12 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitorFactory : IQuerya
     /// </summary>
     public GaussDBQueryableMethodTranslatingExpressionVisitorFactory(
         QueryableMethodTranslatingExpressionVisitorDependencies dependencies,
-        RelationalQueryableMethodTranslatingExpressionVisitorDependencies relationalDependencies)
+        RelationalQueryableMethodTranslatingExpressionVisitorDependencies relationalDependencies,
+        IGaussDBSingletonOptions npgsqlSingletonOptions)
     {
         Dependencies = dependencies;
         RelationalDependencies = relationalDependencies;
+        _gaussDBSingletonOptions = npgsqlSingletonOptions;
     }
 
     /// <summary>
@@ -45,5 +51,9 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitorFactory : IQuerya
     ///     doing so can result in application failures when updating to a new Entity Framework Core release.
     /// </summary>
     public virtual QueryableMethodTranslatingExpressionVisitor Create(QueryCompilationContext queryCompilationContext)
-        => new GaussDBQueryableMethodTranslatingExpressionVisitor(Dependencies, RelationalDependencies, queryCompilationContext);
+        => new GaussDBQueryableMethodTranslatingExpressionVisitor(
+            Dependencies,
+            RelationalDependencies,
+            (RelationalQueryCompilationContext)queryCompilationContext,
+            _gaussDBSingletonOptions);
 }

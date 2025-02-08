@@ -11,14 +11,15 @@ public class GaussDBSqlNullabilityProcessor : SqlNullabilityProcessor
     private readonly ISqlExpressionFactory _sqlExpressionFactory;
 
     /// <summary>
-    ///     Creates a new instance of the <see cref="GaussDBSqlNullabilityProcessor" /> class.
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
     /// </summary>
-    /// <param name="dependencies">Parameter object containing dependencies for this class.</param>
-    /// <param name="useRelationalNulls">A bool value indicating whether relational null semantics are in use.</param>
     public GaussDBSqlNullabilityProcessor(
         RelationalParameterBasedSqlProcessorDependencies dependencies,
-        bool useRelationalNulls)
-        : base(dependencies, useRelationalNulls)
+        RelationalParameterBasedSqlProcessorParameters parameters)
+        : base(dependencies, parameters)
     {
         _sqlExpressionFactory = dependencies.SqlExpressionFactory;
     }
@@ -252,7 +253,7 @@ public class GaussDBSqlNullabilityProcessor : SqlNullabilityProcessor
         }
 
         // If the item is nullable, add an OR to check for the item being null and the array containing null.
-        // The latter check is done with array_next, which returns null when a value was not found, and
+        // The latter check is done with array_position, which returns null when a value was not found, and
         // a position if the item (including null!) was found (IS NOT DISTINCT FROM semantics)
         return _sqlExpressionFactory.OrElse(
             updated,
@@ -260,8 +261,8 @@ public class GaussDBSqlNullabilityProcessor : SqlNullabilityProcessor
                 _sqlExpressionFactory.IsNull(item),
                 _sqlExpressionFactory.IsNotNull(
                     _sqlExpressionFactory.Function(
-                        "array_next",
-                        new[] { array, _sqlExpressionFactory.Constant(null, item.TypeMapping) },
+                        "array_position",
+                        [array, _sqlExpressionFactory.Constant(null, item.Type, item.TypeMapping)],
                         nullable: true,
                         argumentsPropagateNullability: FalseArrays[2],
                         typeof(int)))));

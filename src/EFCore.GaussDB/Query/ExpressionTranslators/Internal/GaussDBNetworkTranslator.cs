@@ -248,16 +248,16 @@ public class GaussDBNetworkTranslator : IMethodCallTranslator
             _ => null
         };
 
-    private SqlFunctionExpression NullPropagatingFunction(
-        string name,
-        SqlExpression[] arguments,
-        Type returnType,
-        RelationalTypeMapping? typeMapping = null)
-        => _sqlExpressionFactory.Function(
-            name,
-            arguments,
-            nullable: true,
-            argumentsPropagateNullability: TrueArrays[arguments.Length],
-            returnType,
-            typeMapping);
+    private SqlExpression NullPropagatingFunction(
+           string name,
+           SqlExpression[] arguments,
+           Type returnType,
+           RelationalTypeMapping? typeMapping = null)
+           => _sqlExpressionFactory.Function(
+               name,
+               arguments,
+               nullable: true,
+               argumentsPropagateNullability: TrueArrays[arguments.Length],
+               returnType,
+               typeMapping);
 }

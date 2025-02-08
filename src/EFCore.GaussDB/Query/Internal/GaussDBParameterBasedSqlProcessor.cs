@@ -16,8 +16,8 @@ public class GaussDBParameterBasedSqlProcessor : RelationalParameterBasedSqlProc
     /// </summary>
     public GaussDBParameterBasedSqlProcessor(
         RelationalParameterBasedSqlProcessorDependencies dependencies,
-        bool useRelationalNulls)
-        : base(dependencies, useRelationalNulls)
+        RelationalParameterBasedSqlProcessorParameters parameters)
+        : base(dependencies, parameters)
     {
     }
 
@@ -48,7 +48,7 @@ public class GaussDBParameterBasedSqlProcessor : RelationalParameterBasedSqlProc
         Check.NotNull(selectExpression, nameof(selectExpression));
         Check.NotNull(parametersValues, nameof(parametersValues));
 
-        return new GaussDBSqlNullabilityProcessor(Dependencies, UseRelationalNulls).Process(
+        return new GaussDBSqlNullabilityProcessor(Dependencies, Parameters).Process(
             selectExpression, parametersValues, out canCache);
     }
 }

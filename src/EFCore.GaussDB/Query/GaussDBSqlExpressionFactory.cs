@@ -225,11 +225,12 @@ public class GaussDBSqlExpressionFactory : SqlExpressionFactory
         => (PgNewArrayExpression)ApplyTypeMapping(new PgNewArrayExpression(expressions, type, typeMapping), typeMapping);
 
     /// <inheritdoc />
-    public override SqlBinaryExpression? MakeBinary(
+    public override SqlExpression? MakeBinary(
         ExpressionType operatorType,
         SqlExpression left,
         SqlExpression right,
-        RelationalTypeMapping? typeMapping)
+        RelationalTypeMapping? typeMapping,
+        SqlExpression? existingExpr = null)
     {
         switch (operatorType)
         {
@@ -268,7 +269,7 @@ public class GaussDBSqlExpressionFactory : SqlExpressionFactory
             }
         }
 
-        return base.MakeBinary(operatorType, left, right, typeMapping);
+        return base.MakeBinary(operatorType, left, right, typeMapping, existingExpr);
     }
 
     /// <summary>
@@ -495,8 +496,19 @@ public class GaussDBSqlExpressionFactory : SqlExpressionFactory
             {
                 var updatedElementBinaryExpression = MakeBinary(binary.OperatorType, leftValues[i], rightValues[i], typeMapping: null)!;
 
-                updatedLeftValues[i] = updatedElementBinaryExpression.Left;
-                updatedRightValues[i] = updatedElementBinaryExpression.Right;
+                if (updatedElementBinaryExpression is not SqlBinaryExpression
+                    {
+                        Left: var updatedLeft,
+                        Right: var updatedRight,
+                        OperatorType: var updatedOperatorType
+                    }
+                    || updatedOperatorType != binary.OperatorType)
+                {
+                    throw new UnreachableException("MakeBinary modified binary expression type/operator when doing row value comparison");
+                }
+
+                updatedLeftValues[i] = updatedLeft;
+                updatedRightValues[i] = updatedRight;
             }
 
             // Note that we always return non-constant PostgresRowValueExpression operands, even if the original input was a
@@ -540,7 +552,7 @@ public class GaussDBSqlExpressionFactory : SqlExpressionFactory
 
                     for (var i = 0; i < v.Length; i++)
                     {
-                        v[i] = Constant(constantTuple[i]);
+                        v[i] = Constant(constantTuple[i], typeof(object));
                     }
 
                     values = v;
@@ -651,7 +663,7 @@ public class GaussDBSqlExpressionFactory : SqlExpressionFactory
         // If a (non-null) type mapping is being applied, it's to the element being indexed.
         // Infer the array's mapping from that.
         var (_, array) = typeMapping is not null
-            ? ApplyTypeMappingsOnItemAndArray(Constant(null, typeMapping), pgArrayIndexExpression.Array)
+            ? ApplyTypeMappingsOnItemAndArray(Constant(null, typeMapping.ClrType, typeMapping), pgArrayIndexExpression.Array)
             : (null, ApplyDefaultTypeMapping(pgArrayIndexExpression.Array));
 
         return new PgArrayIndexExpression(

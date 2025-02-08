@@ -36,10 +36,14 @@ public class GaussDBMigrator : Migrator
         IModelRuntimeInitializer modelRuntimeInitializer,
         IDiagnosticsLogger<DbLoggerCategory.Migrations> logger,
         IRelationalCommandDiagnosticsLogger commandLogger,
-        IDatabaseProvider databaseProvider)
+        IDatabaseProvider databaseProvider,
+        IMigrationsModelDiffer migrationsModelDiffer,
+        IDesignTimeModel designTimeModel,
+        IDbContextOptions contextOptions,
+        IExecutionStrategy executionStrategy)
         : base(migrationsAssembly, historyRepository, databaseCreator, migrationsSqlGenerator, rawSqlCommandBuilder,
             migrationCommandExecutor, connection, sqlGenerationHelper, currentContext, modelRuntimeInitializer, logger,
-            commandLogger, databaseProvider)
+            commandLogger, databaseProvider, migrationsModelDiffer, designTimeModel, contextOptions, executionStrategy)
     {
         _historyRepository = historyRepository;
         _connection = connection;
@@ -60,32 +64,30 @@ public class GaussDBMigrator : Migrator
         PopulateMigrations(
             appliedMigrations.Select(t => t.MigrationId),
             targetMigration,
-            out var migrationsToApply,
-            out var migrationsToRevert,
-            out _);
+            out var migratorData);
 
-        if (migrationsToRevert.Count + migrationsToApply.Count == 0)
+        if (migratorData.RevertedMigrations.Count + migratorData.AppliedMigrations.Count == 0)
         {
             return;
         }
 
-        // If a PostgreSQL extension, enum or range was added, we want GaussDB to reload all types at the ADO.NET level.
-        var migrations = migrationsToApply.Count > 0 ? migrationsToApply : migrationsToRevert;
+        // If a PostgreSQL extension, enum or range was added, we want Npgsql to reload all types at the ADO.NET level.
+        var migrations = migratorData.AppliedMigrations.Count > 0 ? migratorData.AppliedMigrations : migratorData.RevertedMigrations;
         var reloadTypes = migrations
             .SelectMany(m => m.UpOperations)
             .OfType<AlterDatabaseOperation>()
             .Any(o => o.GetPostgresExtensions().Any() || o.GetPostgresEnums().Any() || o.GetPostgresRanges().Any());
 
-        if (reloadTypes && _connection.DbConnection is GaussDBConnection GaussDBConnection)
+        if (reloadTypes && _connection.DbConnection is GaussDBConnection gaussDBConnection)
         {
-            GaussDBConnection.Open();
+            _connection.Open();
             try
             {
-                GaussDBConnection.ReloadTypes();
+                gaussDBConnection.ReloadTypes();
             }
             catch
             {
-                GaussDBConnection.Close();
+                _connection.Close();
             }
         }
     }
@@ -107,32 +109,30 @@ public class GaussDBMigrator : Migrator
         PopulateMigrations(
             appliedMigrations.Select(t => t.MigrationId),
             targetMigration,
-            out var migrationsToApply,
-            out var migrationsToRevert,
-            out _);
+            out var migratorData);
 
-        if (migrationsToRevert.Count + migrationsToApply.Count == 0)
+        if (migratorData.RevertedMigrations.Count + migratorData.AppliedMigrations.Count == 0)
         {
             return;
         }
 
-        // If a PostgreSQL extension, enum or range was added, we want GaussDB to reload all types at the ADO.NET level.
-        var migrations = migrationsToApply.Count > 0 ? migrationsToApply : migrationsToRevert;
+        // If a PostgreSQL extension, enum or range was added, we want Npgsql to reload all types at the ADO.NET level.
+        var migrations = migratorData.AppliedMigrations.Count > 0 ? migratorData.AppliedMigrations : migratorData.RevertedMigrations;
         var reloadTypes = migrations
             .SelectMany(m => m.UpOperations)
             .OfType<AlterDatabaseOperation>()
             .Any(o => o.GetPostgresExtensions().Any() || o.GetPostgresEnums().Any() || o.GetPostgresRanges().Any());
 
-        if (reloadTypes && _connection.DbConnection is GaussDBConnection GaussDBConnection)
+        if (reloadTypes && _connection.DbConnection is GaussDBConnection gaussDB)
         {
-            await GaussDBConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await _connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await GaussDBConnection.ReloadTypesAsync().ConfigureAwait(false);
+                await gaussDB.ReloadTypesAsync().ConfigureAwait(false);
             }
             catch
             {
-                await GaussDBConnection.CloseAsync().ConfigureAwait(false);
+                await _connection.CloseAsync().ConfigureAwait(false);
             }
         }
     }

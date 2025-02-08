@@ -335,7 +335,7 @@ public class GaussDBQuerySqlGenerator : QuerySqlGenerator
                     var table = selectExpression.Tables[i];
                     var joinExpression = table as JoinExpressionBase;
 
-                    if (ReferenceEquals(updateExpression.Table, joinExpression?.Table ?? table))
+                    if (updateExpression.Table.Alias == (joinExpression?.Table.Alias ?? table.Alias))
                     {
                         LiftPredicate(table);
                         continue;
@@ -406,7 +406,7 @@ public class GaussDBQuerySqlGenerator : QuerySqlGenerator
         }
 
         throw new InvalidOperationException(
-            RelationalStrings.ExecuteOperationWithUnsupportedOperatorInSqlGeneration(nameof(RelationalQueryableExtensions.ExecuteUpdate)));
+            RelationalStrings.ExecuteOperationWithUnsupportedOperatorInSqlGeneration(nameof(EntityFrameworkQueryableExtensions.ExecuteUpdate)));
     }
 
     /// <summary>
@@ -760,6 +760,16 @@ public class GaussDBQuerySqlGenerator : QuerySqlGenerator
     /// </summary>
     protected override void GenerateValues(ValuesExpression valuesExpression)
     {
+        if (valuesExpression.RowValues is null)
+        {
+            throw new UnreachableException();
+        }
+
+        if (valuesExpression.RowValues.Count == 0)
+        {
+            throw new InvalidOperationException(RelationalStrings.EmptyCollectionNotSupportedAsInlineQueryRoot);
+        }
+
         // PostgreSQL supports providing the names of columns projected out of VALUES: (VALUES (1, 3), (2, 4)) AS x(a, b).
         // But since other databases sometimes don't, the default relational implementation is complex, involving a SELECT for the first row
         // and a UNION All on the rest. Override to do the nice simple thing.
@@ -1083,8 +1093,7 @@ public class GaussDBQuerySqlGenerator : QuerySqlGenerator
                     s => s switch
                     {
                         { PropertyName: string propertyName }
-                            => new SqlConstantExpression(
-                                Expression.Constant(propertyName), _textTypeMapping ??= _typeMappingSource.FindMapping(typeof(string))),
+                            => new SqlConstantExpression(propertyName, _textTypeMapping ??= _typeMappingSource.FindMapping(typeof(string))),
                         { ArrayIndex: SqlExpression arrayIndex } => arrayIndex,
                         _ => throw new UnreachableException()
                     }).ToList());
@@ -1516,15 +1525,9 @@ public class GaussDBQuerySqlGenerator : QuerySqlGenerator
         }
     }
 
-    private sealed class OuterReferenceFindingExpressionVisitor : ExpressionVisitor
+    private sealed class OuterReferenceFindingExpressionVisitor(TableExpression mainTable) : ExpressionVisitor
     {
-        private readonly TableExpression _mainTable;
         private bool _containsReference;
-
-        public OuterReferenceFindingExpressionVisitor(TableExpression mainTable)
-        {
-            _mainTable = mainTable;
-        }
 
         public bool ContainsReferenceToMainTable(SqlExpression sqlExpression)
         {
@@ -1543,8 +1546,8 @@ public class GaussDBQuerySqlGenerator : QuerySqlGenerator
                 return expression;
             }
 
-            if (expression is ColumnExpression columnExpression
-                && columnExpression.Table == _mainTable)
+            if (expression is ColumnExpression { TableAlias: var tableAlias }
+                && tableAlias == mainTable.Alias)
             {
                 _containsReference = true;
 

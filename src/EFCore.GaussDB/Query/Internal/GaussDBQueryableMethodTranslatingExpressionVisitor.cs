@@ -1,4 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
+using DotNetCore.EntityFrameworkCore.GaussDB.Extensions.Internal;
+using GaussDB.EntityFrameworkCore.PostgreSQL.Infrastructure.Internal;
 using GaussDB.EntityFrameworkCore.PostgreSQL.Query.Expressions;
 using GaussDB.EntityFrameworkCore.PostgreSQL.Query.Expressions.Internal;
 using GaussDB.EntityFrameworkCore.PostgreSQL.Storage.Internal;
@@ -15,8 +17,11 @@ namespace GaussDB.EntityFrameworkCore.PostgreSQL.Query.Internal;
 /// </summary>
 public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQueryableMethodTranslatingExpressionVisitor
 {
+    private readonly RelationalQueryCompilationContext _queryCompilationContext;
     private readonly GaussDBTypeMappingSource _typeMappingSource;
     private readonly GaussDBSqlExpressionFactory _sqlExpressionFactory;
+    private readonly bool _isRedshift;
+    private RelationalTypeMapping? _ordinalityTypeMapping;
 
     #region MethodInfos
 
@@ -43,11 +48,14 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     public GaussDBQueryableMethodTranslatingExpressionVisitor(
         QueryableMethodTranslatingExpressionVisitorDependencies dependencies,
         RelationalQueryableMethodTranslatingExpressionVisitorDependencies relationalDependencies,
-        QueryCompilationContext queryCompilationContext)
+        RelationalQueryCompilationContext queryCompilationContext,
+        IGaussDBSingletonOptions gaussDBSingletonOptions)
         : base(dependencies, relationalDependencies, queryCompilationContext)
     {
+        _queryCompilationContext = queryCompilationContext;
         _typeMappingSource = (GaussDBTypeMappingSource)relationalDependencies.TypeMappingSource;
         _sqlExpressionFactory = (GaussDBSqlExpressionFactory)relationalDependencies.SqlExpressionFactory;
+        _isRedshift = gaussDBSingletonOptions.UseRedshift;
     }
 
     /// <summary>
@@ -59,8 +67,10 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     protected GaussDBQueryableMethodTranslatingExpressionVisitor(GaussDBQueryableMethodTranslatingExpressionVisitor parentVisitor)
         : base(parentVisitor)
     {
+        _queryCompilationContext = parentVisitor._queryCompilationContext;
         _typeMappingSource = parentVisitor._typeMappingSource;
         _sqlExpressionFactory = parentVisitor._sqlExpressionFactory;
+        _isRedshift = parentVisitor._isRedshift;
     }
 
     /// <summary>
@@ -78,11 +88,17 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     ///     any release. You should only use it directly in your code with extreme caution and knowing that
     ///     doing so can result in application failures when updating to a new Entity Framework Core release.
     /// </summary>
-    protected override ShapedQueryExpression TranslatePrimitiveCollection(
+    protected override ShapedQueryExpression? TranslatePrimitiveCollection(
         SqlExpression sqlExpression,
         IProperty? property,
         string tableAlias)
     {
+        if (_isRedshift)
+        {
+            AddTranslationErrorDetails("Redshift does not support unnest, which is required for most forms of querying of JSON arrays.");
+            return null;
+        }
+
         var elementClrType = sqlExpression.Type.GetSequenceType();
         var elementTypeMapping = (RelationalTypeMapping?)sqlExpression.TypeMapping?.ElementTypeMapping;
 
@@ -108,8 +124,10 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
         {
             // TODO: For geometry collection support (not yet supported), see #2850.
             selectExpression = new SelectExpression(
-                new TableValuedFunctionExpression(tableAlias, "ST_Dump", new[] { sqlExpression }),
-                "geom", elementClrType, elementTypeMapping, isElementNullable);
+                [new TableValuedFunctionExpression(tableAlias, "ST_Dump", [sqlExpression])],
+                new ColumnExpression("geom", tableAlias, elementClrType.UnwrapNullableType(), elementTypeMapping, isElementNullable),
+                identifier: [], // TODO
+                _queryCompilationContext.SqlAliasManager);
         }
         else
         {
@@ -119,18 +137,23 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
             // (f above); since the table alias may get uniquified by EF, this would break queries.
 
             // TODO: When we have metadata to determine if the element is nullable, pass that here to SelectExpression
-            // Note also that with PostgreSQL unnest, the output ordering is guaranteed to be the same as the input array, so we don't need
-            // to add ordering like in most other providers (https://www.postgresql.org/docs/current/functions-array.html)
-            // We also don't need to apply any casts or typing, since PG arrays are fully typed (unlike e.g. a JSON string).
+
+            // Note also that with PostgreSQL unnest, the output ordering is guaranteed to be the same as the input array. However, we still
+            // need to add an explicit ordering on the ordinality column, since once the unnest is joined into a select, its "natural"
+            // orderings is lost and an explicit ordering is needed again (see #3207).
+            var (ordinalityColumn, ordinalityComparer) = GenerateOrdinalityIdentifier(tableAlias);
             selectExpression = new SelectExpression(
-                new PgUnnestExpression(tableAlias, sqlExpression, "value"),
-                columnName: "value",
-                columnType: elementClrType,
-                columnTypeMapping: elementTypeMapping,
-                isColumnNullable: isElementNullable,
-                identifierColumnName: "ordinality",
-                identifierColumnType: typeof(int),
-                identifierColumnTypeMapping: _typeMappingSource.FindMapping(typeof(int)));
+                [new PgUnnestExpression(tableAlias, sqlExpression, "value")],
+                new ColumnExpression(
+                    "value",
+                    tableAlias,
+                    elementClrType.UnwrapNullableType(),
+                    elementTypeMapping,
+                    isElementNullable),
+                identifier: [(ordinalityColumn, ordinalityComparer)],
+                _queryCompilationContext.SqlAliasManager);
+
+            selectExpression.AppendOrdering(new OrderingExpression(ordinalityColumn, ascending: true));
         }
 #pragma warning restore EF1001
 
@@ -187,7 +210,8 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 columnInfos.Add(
                     new PgTableValuedFunctionExpression.ColumnInfo
                     {
-                        Name = jsonPropertyName, TypeMapping = property.GetRelationalTypeMapping()
+                        Name = jsonPropertyName,
+                        TypeMapping = property.GetRelationalTypeMapping()
                     });
             }
         }
@@ -214,15 +238,15 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
 
         // Construct the json_to_recordset around the JsonScalarExpression, and wrap it in a SelectExpression
         var jsonToRecordSetExpression = new PgTableValuedFunctionExpression(
-            tableAlias, functionName, new[] { jsonScalarExpression }, columnInfos, withOrdinality: true);
+            tableAlias, functionName, [jsonScalarExpression], columnInfos, withOrdinality: true);
 
 #pragma warning disable EF1001 // Internal EF Core API usage.
-        var selectExpression = new SelectExpression(
+        var selectExpression = CreateSelect(
             jsonQueryExpression,
             jsonToRecordSetExpression,
-            identifierColumnName: "ordinality",
-            identifierColumnType: typeof(int),
-            identifierColumnTypeMapping: _typeMappingSource.FindMapping(typeof(int))!);
+            "ordinality",
+            typeof(int),
+            _typeMappingSource.FindMapping(typeof(int))!);
 #pragma warning restore EF1001 // Internal EF Core API usage.
 
         return new ShapedQueryExpression(
@@ -245,17 +269,6 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 .SelectMany(t => t.GetDeclaredNavigations());
     }
 
-    /// <summary>
-    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-    ///     any release. You should only use it directly in your code with extreme caution and knowing that
-    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-    /// </summary>
-    protected override Expression ApplyInferredTypeMappings(
-        Expression expression,
-        IReadOnlyDictionary<(TableExpressionBase, string), RelationalTypeMapping?> inferredTypeMappings)
-        => new GaussDBInferredTypeMappingApplier(
-            RelationalDependencies.Model, _typeMappingSource, _sqlExpressionFactory, inferredTypeMappings).Visit(expression);
 
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
@@ -265,16 +278,9 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     /// </summary>
     protected override ShapedQueryExpression? TranslateAll(ShapedQueryExpression source, LambdaExpression predicate)
     {
-        if (source.QueryExpression is SelectExpression
-            {
-                Tables: [(PgUnnestExpression or ValuesExpression { ColumnNames: ["_ord", "Value"] }) and var sourceTable],
-                Predicate: null,
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null
-            }
+        if ((source.TryExtractArray(out var array, ignoreOrderings: true)
+            || source.TryConvertValuesToArray(out array, ignoreOrderings: true))
+            && source.QueryExpression is SelectExpression { Tables: [{ Alias: var tableAlias }] }
             && TranslateLambdaExpression(source, predicate) is { } translatedPredicate)
         {
             switch (translatedPredicate)
@@ -282,56 +288,56 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match for: new[] { "a", "b", "c" }.All(p => EF.Functions.Like(e.SomeText, p)),
                 // which we translate to WHERE s.""SomeText"" LIKE ALL (ARRAY['a','b','c'])
                 case LikeExpression
-                    {
-                        Match: var match,
-                        Pattern: ColumnExpression pattern,
-                        EscapeChar: SqlConstantExpression { Value: "" }
-                    }
-                    when pattern.Table == sourceTable:
+                {
+                    Match: var match,
+                    Pattern: ColumnExpression pattern,
+                    EscapeChar: SqlConstantExpression { Value: "" }
+                }
+                    when pattern.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
-                        _sqlExpressionFactory.All(match, GetArray(sourceTable), PgAllOperatorType.Like));
+                        _sqlExpressionFactory.All(match, array, PgAllOperatorType.Like));
                 }
 
                 // Pattern match for: new[] { "a", "b", "c" }.All(p => EF.Functions.Like(e.SomeText, p)),
                 // which we translate to WHERE s.""SomeText"" LIKE ALL (ARRAY['a','b','c'])
                 case PgILikeExpression
-                    {
-                        Match: var match,
-                        Pattern: ColumnExpression pattern,
-                        EscapeChar: SqlConstantExpression { Value: "" }
-                    }
-                    when pattern.Table == sourceTable:
+                {
+                    Match: var match,
+                    Pattern: ColumnExpression pattern,
+                    EscapeChar: SqlConstantExpression { Value: "" }
+                }
+                    when pattern.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
-                        _sqlExpressionFactory.All(match, GetArray(sourceTable), PgAllOperatorType.ILike));
+                        _sqlExpressionFactory.All(match, array, PgAllOperatorType.ILike));
                 }
 
                 // Pattern match for: e.SomeArray.All(p => ints.Contains(p)) over non-column,
                 // using array containment (<@)
                 case PgAnyExpression
-                    {
-                        Item: ColumnExpression sourceColumn,
-                        Array: var otherArray
-                    }
-                    when sourceColumn.Table == sourceTable:
                 {
-                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.ContainedBy(GetArray(sourceTable), otherArray));
+                    Item: ColumnExpression sourceColumn,
+                    Array: var otherArray
+                }
+                    when sourceColumn.TableAlias == tableAlias:
+                {
+                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.ContainedBy(array, otherArray));
                 }
 
                 // Pattern match for: new[] { 4, 5 }.All(p => e.SomeArray.Contains(p)) over column,
                 // using array containment (<@)
                 case PgBinaryExpression
-                    {
-                        OperatorType: PgExpressionType.Contains,
-                        Left: var otherArray,
-                        Right: PgNewArrayExpression { Expressions: [ColumnExpression sourceColumn] }
-                    }
-                    when sourceColumn.Table == sourceTable:
                 {
-                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.ContainedBy(GetArray(sourceTable), otherArray));
+                    OperatorType: PgExpressionType.Contains,
+                    Left: var otherArray,
+                    Right: PgNewArrayExpression { Expressions: [ColumnExpression sourceColumn] }
+                }
+                    when sourceColumn.TableAlias == tableAlias:
+                {
+                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.ContainedBy(array, otherArray));
                 }
             }
         }
@@ -347,16 +353,9 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     /// </summary>
     protected override ShapedQueryExpression? TranslateAny(ShapedQueryExpression source, LambdaExpression? predicate)
     {
-        if (source.QueryExpression is SelectExpression
-            {
-                Tables: [(PgUnnestExpression or ValuesExpression { ColumnNames: ["_ord", "Value"] }) and var sourceTable],
-                Predicate: null,
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null
-            })
+        if ((source.TryExtractArray(out var array, ignoreOrderings: true)
+                || source.TryConvertValuesToArray(out array, ignoreOrderings: true))
+            && source.QueryExpression is SelectExpression { Tables: [{ Alias: var tableAlias }] })
         {
             // Pattern match: x.Array.Any()
             // Translation: cardinality(x.array) > 0 instead of EXISTS (SELECT 1 FROM FROM unnest(x.Array))
@@ -367,7 +366,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                     _sqlExpressionFactory.GreaterThan(
                         _sqlExpressionFactory.Function(
                             "cardinality",
-                            new[] { GetArray(sourceTable) },
+                            [array],
                             nullable: true,
                             argumentsPropagateNullability: TrueArrays[1],
                             typeof(int)),
@@ -384,56 +383,56 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: new[] { "a", "b", "c" }.Any(p => EF.Functions.Like(e.SomeText, p))
                 // Translation: s.SomeText LIKE ANY (ARRAY['a','b','c'])
                 case LikeExpression
-                    {
-                        Match: var match,
-                        Pattern: ColumnExpression pattern,
-                        EscapeChar: SqlConstantExpression { Value: "" }
-                    }
-                    when pattern.Table == sourceTable:
+                {
+                    Match: var match,
+                    Pattern: ColumnExpression pattern,
+                    EscapeChar: SqlConstantExpression { Value: "" }
+                }
+                    when pattern.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
-                        source, _sqlExpressionFactory.Any(match, GetArray(sourceTable), PgAnyOperatorType.Like));
+                        source, _sqlExpressionFactory.Any(match, array, PgAnyOperatorType.Like));
                 }
 
                 // Pattern match: new[] { "a", "b", "c" }.Any(p => EF.Functions.Like(e.SomeText, p))
                 // Translation: s.SomeText LIKE ANY (ARRAY['a','b','c'])
                 case PgILikeExpression
-                    {
-                        Match: var match,
-                        Pattern: ColumnExpression pattern,
-                        EscapeChar: SqlConstantExpression { Value: "" }
-                    }
-                    when pattern.Table == sourceTable:
+                {
+                    Match: var match,
+                    Pattern: ColumnExpression pattern,
+                    EscapeChar: SqlConstantExpression { Value: "" }
+                }
+                    when pattern.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
-                        source, _sqlExpressionFactory.Any(match, GetArray(sourceTable), PgAnyOperatorType.ILike));
+                        source, _sqlExpressionFactory.Any(match, array, PgAnyOperatorType.ILike));
                 }
 
                 // Array overlap over non-column
                 // Pattern match: e.SomeArray.Any(p => ints.Contains(p))
                 // Translation: @ints && s.SomeArray
                 case PgAnyExpression
-                    {
-                        Item: ColumnExpression sourceColumn,
-                        Array: var otherArray
-                    }
-                    when sourceColumn.Table == sourceTable:
                 {
-                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.Overlaps(GetArray(sourceTable), otherArray));
+                    Item: ColumnExpression sourceColumn,
+                    Array: var otherArray
+                }
+                    when sourceColumn.TableAlias == tableAlias:
+                {
+                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.Overlaps(array, otherArray));
                 }
 
                 // Array overlap over column
                 // Pattern match: new[] { 4, 5 }.Any(p => e.SomeArray.Contains(p))
                 // Translation: s.SomeArray && ARRAY[4, 5]
                 case PgBinaryExpression
-                    {
-                        OperatorType: PgExpressionType.Contains,
-                        Left: var otherArray,
-                        Right: PgNewArrayExpression { Expressions: [ColumnExpression sourceColumn] }
-                    }
-                    when sourceColumn.Table == sourceTable:
                 {
-                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.Overlaps(GetArray(sourceTable), otherArray));
+                    OperatorType: PgExpressionType.Contains,
+                    Left: var otherArray,
+                    Right: PgNewArrayExpression { Expressions: [ColumnExpression sourceColumn] }
+                }
+                    when sourceColumn.TableAlias == tableAlias:
+                {
+                    return BuildSimplifiedShapedQuery(source, _sqlExpressionFactory.Overlaps(array, otherArray));
                 }
 
                 #region LTree translations
@@ -441,19 +440,19 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: new[] { "q1", "q2" }.Any(q => e.SomeLTree.MatchesLQuery(q))
                 // Translation: s.SomeLTree ? ARRAY['q1','q2']
                 case PgBinaryExpression
-                    {
-                        OperatorType: PgExpressionType.LTreeMatches,
-                        Left: var ltree,
-                        Right: SqlUnaryExpression { OperatorType: ExpressionType.Convert, Operand: ColumnExpression lqueryColumn }
-                    }
-                    when lqueryColumn.Table == sourceTable:
+                {
+                    OperatorType: PgExpressionType.LTreeMatches,
+                    Left: var ltree,
+                    Right: SqlUnaryExpression { OperatorType: ExpressionType.Convert, Operand: ColumnExpression lqueryColumn }
+                }
+                    when lqueryColumn.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
                         new PgBinaryExpression(
                             PgExpressionType.LTreeMatchesAny,
                             ltree,
-                            _sqlExpressionFactory.ApplyTypeMapping(GetArray(sourceTable), _typeMappingSource.FindMapping("lquery[]")),
+                            _sqlExpressionFactory.ApplyTypeMapping(array, _typeMappingSource.FindMapping("lquery[]")),
                             typeof(bool),
                             typeMapping: _typeMappingSource.FindMapping(typeof(bool))));
                 }
@@ -463,19 +462,19 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: new[] { "t1", "t2" }.Any(t => t.IsDescendantOf(e.SomeLTree))
                 // Translation: ARRAY['t1','t2'] <@ s.SomeLTree
                 case PgBinaryExpression
-                    {
-                        OperatorType: (PgExpressionType.Contains or PgExpressionType.ContainedBy) and var operatorType,
-                        Left: ColumnExpression ltreeColumn,
-                        // Contains/ContainedBy can happen for non-LTree types too, so check that
-                        Right: { TypeMapping: GaussDBLTreeTypeMapping } ltree
-                    }
-                    when ltreeColumn.Table == sourceTable:
+                {
+                    OperatorType: (PgExpressionType.Contains or PgExpressionType.ContainedBy) and var operatorType,
+                    Left: ColumnExpression ltreeColumn,
+                    // Contains/ContainedBy can happen for non-LTree types too, so check that
+                    Right: { TypeMapping: GaussDBLTreeTypeMapping } ltree
+                }
+                    when ltreeColumn.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
                         new PgBinaryExpression(
                             operatorType,
-                            _sqlExpressionFactory.ApplyDefaultTypeMapping(GetArray(sourceTable)),
+                            _sqlExpressionFactory.ApplyDefaultTypeMapping(array),
                             ltree,
                             typeof(bool),
                             typeMapping: _typeMappingSource.FindMapping(typeof(bool))));
@@ -486,18 +485,18 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: new[] { "t1", "t2" }.Any(t => t.MatchesLTxtQuery(ltxtquery))
                 // Translation: ARRAY['t1','t2'] @ ltxtquery
                 case PgBinaryExpression
-                    {
-                        OperatorType: PgExpressionType.LTreeMatches,
-                        Left: ColumnExpression ltreeColumn,
-                        Right: var lquery
-                    }
-                    when ltreeColumn.Table == sourceTable:
+                {
+                    OperatorType: PgExpressionType.LTreeMatches,
+                    Left: ColumnExpression ltreeColumn,
+                    Right: var lquery
+                }
+                    when ltreeColumn.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
                         new PgBinaryExpression(
                             PgExpressionType.LTreeMatches,
-                            _sqlExpressionFactory.ApplyDefaultTypeMapping(GetArray(sourceTable)),
+                            _sqlExpressionFactory.ApplyDefaultTypeMapping(array),
                             lquery,
                             typeof(bool),
                             typeMapping: _typeMappingSource.FindMapping(typeof(bool))));
@@ -507,18 +506,18 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: ltrees.Any(t => lqueries.Any(q => t.MatchesLQuery(q)))
                 // Translate: ltrees ? lqueries
                 case PgBinaryExpression
-                    {
-                        OperatorType: PgExpressionType.LTreeMatchesAny,
-                        Left: ColumnExpression ltreeColumn,
-                        Right: var lqueries
-                    }
-                    when ltreeColumn.Table == sourceTable:
+                {
+                    OperatorType: PgExpressionType.LTreeMatchesAny,
+                    Left: ColumnExpression ltreeColumn,
+                    Right: var lqueries
+                }
+                    when ltreeColumn.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
                         new PgBinaryExpression(
                             PgExpressionType.LTreeMatchesAny,
-                            _sqlExpressionFactory.ApplyDefaultTypeMapping(GetArray(sourceTable)),
+                            _sqlExpressionFactory.ApplyDefaultTypeMapping(array),
                             lqueries,
                             typeof(bool),
                             typeMapping: _typeMappingSource.FindMapping(typeof(bool))));
@@ -536,26 +535,28 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 Tables:
                 [
                     IntersectExpression
+                {
+                    Source1:
                     {
-                        Source1:
-                        {
-                            Tables: [PgUnnestExpression { Array: var array1 }],
-                            GroupBy: [],
-                            Having: null,
-                            IsDistinct: false,
-                            Limit: null,
-                            Offset: null
-                        },
-                        Source2:
-                        {
-                            Tables: [PgUnnestExpression { Array: var array2 }],
-                            GroupBy: [],
-                            Having: null,
-                            IsDistinct: false,
-                            Limit: null,
-                            Offset: null
-                        }
+                        Tables: [PgUnnestExpression { Array: var array1 }],
+                        Predicate: null,
+                        GroupBy: [],
+                        Having: null,
+                        IsDistinct: false,
+                        Limit: null,
+                        Offset: null
+                    },
+                    Source2:
+                    {
+                        Tables: [PgUnnestExpression { Array: var array2 }],
+                        Predicate: null,
+                        GroupBy: [],
+                        Having: null,
+                        IsDistinct: false,
+                        Limit: null,
+                        Offset: null
                     }
+                }
                 ],
                 GroupBy: [],
                 Having: null,
@@ -578,26 +579,11 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     /// </summary>
     protected override ShapedQueryExpression? TranslateContains(ShapedQueryExpression source, Expression item)
     {
-        if (source.QueryExpression is SelectExpression
-            {
-                Tables: [(PgUnnestExpression or ValuesExpression { ColumnNames: ["_ord", "Value"] }) and var sourceTable],
-                Predicate: null,
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null
-            })
+        // Note that most other simplifications convert ValuesExpression to unnest over array constructor, but we avoid doing that
+        // here for Contains, since the relational translation for ValuesExpression is better.
+        if (source.TryExtractArray(out var array, ignoreOrderings: true)
+            && TranslateExpression(item, applyDefaultTypeMapping: false) is SqlExpression translatedItem)
         {
-            if (TranslateExpression(item, applyDefaultTypeMapping: false) is not SqlExpression translatedItem)
-            {
-                return null;
-            }
-
-            // Note that most other simplifications here convert ValuesExpression to unnest over array constructor, but we avoid doing that
-            // here, since the relational translation for ValuesExpression is better.
-            var array = GetArray(sourceTable);
-
             (translatedItem, array) = _sqlExpressionFactory.ApplyTypeMappingsOnItemAndArray(translatedItem, array);
 
             // When the array is a column, we translate Contains to array @> ARRAY[item]. GIN indexes on array are used, but null
@@ -607,16 +593,16 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 case ColumnExpression:
                     if (translatedItem is SqlConstantExpression { Value: null })
                     {
-                        // We special-case null constant item and use array_next instead, since it does
+                        // We special-case null constant item and use array_position instead, since it does
                         // nulls correctly (but doesn't use indexes)
-                        // TODO: once lambda-based caching is implemented, move this to GaussDBSqlNullabilityProcessor
+                        // TODO: once lambda-based caching is implemented, move this to NpgsqlSqlNullabilityProcessor
                         // (https://github.com/dotnet/efcore/issues/17598) and do for parameters as well.
                         return BuildSimplifiedShapedQuery(
                             source,
                             _sqlExpressionFactory.IsNotNull(
                                 _sqlExpressionFactory.Function(
-                                    "array_next",
-                                    new[] { array, translatedItem },
+                                    "array_position",
+                                    [array, translatedItem],
                                     nullable: true,
                                     argumentsPropagateNullability: FalseArrays[2],
                                     typeof(int))));
@@ -626,7 +612,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                         source,
                         _sqlExpressionFactory.Contains(
                             array,
-                            _sqlExpressionFactory.NewArrayOrConstant(new[] { translatedItem }, array.Type, array.TypeMapping)));
+                            _sqlExpressionFactory.NewArrayOrConstant([translatedItem], array.Type, array.TypeMapping)));
 
                 // For constant arrays (new[] { 1, 2, 3 }) or inline arrays (new[] { 1, param, 3 }), don't do anything PG-specific for since
                 // the general EF Core mechanism is fine for that case: item IN (1, 2, 3).
@@ -667,29 +653,22 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     protected override ShapedQueryExpression? TranslateCount(ShapedQueryExpression source, LambdaExpression? predicate)
     {
         // Simplify x.Array.Count() => cardinality(x.Array) instead of SELECT COUNT(*) FROM unnest(x.Array)
-        if (predicate is null
-            && source.QueryExpression is SelectExpression
-            {
-                Tables: [PgUnnestExpression { Array: var array }],
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null
-            })
+        if (predicate is null && source.TryExtractArray(out var array, ignoreOrderings: true))
         {
             var translation = _sqlExpressionFactory.Function(
                 "cardinality",
-                new[] { array },
+                [array],
                 nullable: true,
                 argumentsPropagateNullability: TrueArrays[1],
                 typeof(int));
 
+#pragma warning disable EF1001 // SelectExpression constructors are currently internal
             return source.Update(
-                _sqlExpressionFactory.Select(translation),
+                new SelectExpression(translation, _queryCompilationContext.SqlAliasManager),
                 Expression.Convert(
                     new ProjectionBindingExpression(source.QueryExpression, new ProjectionMember(), typeof(int?)),
                     typeof(int)));
+#pragma warning restore EF1001
         }
 
         return base.TranslateCount(source, predicate);
@@ -705,28 +684,8 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     {
         // Simplify x.Array.Concat(y.Array) => x.Array || y.Array instead of:
         // SELECT u.value FROM unnest(x.Array) UNION ALL SELECT u.value FROM unnest(y.Array)
-        if (source1.QueryExpression is SelectExpression
-            {
-                Tables: [PgUnnestExpression { Array: var array1 } unnestExpression1],
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null,
-                Orderings: []
-            }
-            && source2.QueryExpression is SelectExpression
-            {
-                Tables: [PgUnnestExpression { Array: var array2 }],
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null,
-                Orderings: []
-            }
-            && TryGetProjectedColumn(source1, out var projectedColumn1)
-            && TryGetProjectedColumn(source2, out var projectedColumn2))
+        if (source1.TryExtractArray(out var array1, out var projectedColumn1)
+            && source2.TryExtractArray(out var array2, out var projectedColumn2))
         {
             Check.DebugAssert(projectedColumn1.Type == projectedColumn2.Type, "projectedColumn1.Type == projectedColumn2.Type");
             Check.DebugAssert(
@@ -736,16 +695,13 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
             // TODO: Conflicting type mappings from both sides?
             var inferredTypeMapping = projectedColumn1.TypeMapping ?? projectedColumn2.TypeMapping;
 
-#pragma warning disable EF1001 // Internal EF Core API usage.
+#pragma warning disable EF1001 // SelectExpression constructors are currently internal
+            var tableAlias = ((SelectExpression)source1.QueryExpression).Tables.Single().Alias!;
             var selectExpression = new SelectExpression(
-                new PgUnnestExpression(unnestExpression1.Alias, _sqlExpressionFactory.Add(array1, array2), "value"),
-                columnName: "value",
-                columnType: projectedColumn1.Type,
-                columnTypeMapping: inferredTypeMapping,
-                isColumnNullable: projectedColumn1.IsNullable || projectedColumn2.IsNullable,
-                identifierColumnName: "ordinality",
-                identifierColumnType: typeof(int),
-                identifierColumnTypeMapping: _typeMappingSource.FindMapping(typeof(int)));
+                [new PgUnnestExpression(tableAlias, _sqlExpressionFactory.Add(array1, array2), "value")],
+                new ColumnExpression("value", tableAlias, projectedColumn1.Type, inferredTypeMapping, projectedColumn1.IsNullable || projectedColumn2.IsNullable),
+                identifier: [GenerateOrdinalityIdentifier(tableAlias)],
+                _queryCompilationContext.SqlAliasManager);
 #pragma warning restore EF1001 // Internal EF Core API usage.
 
             // TODO: Simplify by using UpdateQueryExpression after https://github.com/dotnet/efcore/issues/31511
@@ -767,6 +723,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
         return base.TranslateConcat(source1, source2);
     }
 
+
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
     ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
@@ -781,26 +738,18 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
         // Simplify x.Array[1] => x.Array[1] (using the PG array subscript operator) instead of a subquery with LIMIT/OFFSET
         // Note that we have unnest over multiranges, not just arrays - but multiranges don't support subscripting/slicing.
         if (!returnDefault
-            && source.QueryExpression is SelectExpression
-            {
-                Tables: [PgUnnestExpression { Array: var array }],
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Orderings: [],
-                Limit: null,
-                Offset: null
-            }
-            && IsPostgresArray(array)
-            && TryGetProjectedColumn(source, out var projectedColumn)
+            && source.TryExtractArray(out var array, out var projectedColumn)
             && TranslateExpression(index) is { } translatedIndex)
         {
             // Note that PostgreSQL arrays are 1-based, so adjust the index.
+#pragma warning disable EF1001 // SelectExpression constructors are currently internal
             return source.UpdateQueryExpression(
-                _sqlExpressionFactory.Select(
+                new SelectExpression(
                     _sqlExpressionFactory.ArrayIndex(
                         array,
-                        GenerateOneBasedIndexExpression(translatedIndex), projectedColumn.IsNullable)));
+                        GenerateOneBasedIndexExpression(translatedIndex), projectedColumn.IsNullable),
+                _queryCompilationContext.SqlAliasManager));
+#pragma warning restore EF1001
         }
 
         return base.TranslateElementAtOrDefault(source, index, returnDefault);
@@ -821,17 +770,9 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
         // Some LTree translations (see LTreeQueryTest)
         // Note that preprocessing normalizes FirstOrDefault(predicate) to Where(predicate).FirstOrDefault(), so the source's
         // select expression should already contain our predicate.
-        if (source.QueryExpression is SelectExpression
-            {
-                Tables: [(PgUnnestExpression or ValuesExpression { ColumnNames: ["_ord", "Value"] }) and var sourceTable],
-                Predicate: var translatedPredicate,
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Limit: null,
-                Offset: null,
-                Orderings: []
-            }
+        if ((source.TryExtractArray(out var array, ignorePredicate: true)
+                || source.TryConvertValuesToArray(out array, ignorePredicate: true))
+            && source.QueryExpression is SelectExpression { Tables: [{ Alias: var tableAlias }], Predicate: var translatedPredicate }
             && translatedPredicate is null ^ predicate is null)
         {
             if (translatedPredicate is null)
@@ -850,13 +791,13 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: new[] { "t1", "t2" }.FirstOrDefault(t => t.IsDescendant(e.SomeLTree))
                 // Translation: ARRAY['t1','t2'] ?<@ e.SomeLTree
                 case PgBinaryExpression
-                    {
-                        OperatorType: (PgExpressionType.Contains or PgExpressionType.ContainedBy) and var operatorType,
-                        Left: ColumnExpression ltreeColumn,
-                        // Contains/ContainedBy can happen for non-LTree types too, so check that
-                        Right: { TypeMapping: GaussDBLTreeTypeMapping } ltree
-                    }
-                    when ltreeColumn.Table == sourceTable:
+                {
+                    OperatorType: (PgExpressionType.Contains or PgExpressionType.ContainedBy) and var operatorType,
+                    Left: ColumnExpression ltreeColumn,
+                    // Contains/ContainedBy can happen for non-LTree types too, so check that
+                    Right: { TypeMapping: GaussDBLTreeTypeMapping } ltree
+                }
+                    when ltreeColumn.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
@@ -864,7 +805,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                             operatorType == PgExpressionType.Contains
                                 ? PgExpressionType.LTreeFirstAncestor
                                 : PgExpressionType.LTreeFirstDescendent,
-                            _sqlExpressionFactory.ApplyDefaultTypeMapping(GetArray(sourceTable)),
+                            _sqlExpressionFactory.ApplyDefaultTypeMapping(array),
                             ltree,
                             typeof(LTree),
                             _typeMappingSource.FindMapping(typeof(LTree))));
@@ -875,18 +816,18 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 // Pattern match: new[] { "t1", "t2" }.FirstOrDefault(t => t.MatchesLQuery(ltxtquery))
                 // Translation: ARRAY['t1','t2'] ?@ e.ltxtquery
                 case PgBinaryExpression
-                    {
-                        OperatorType: PgExpressionType.LTreeMatches,
-                        Left: ColumnExpression ltreeColumn,
-                        Right: var lquery
-                    }
-                    when ltreeColumn.Table == sourceTable:
+                {
+                    OperatorType: PgExpressionType.LTreeMatches,
+                    Left: ColumnExpression ltreeColumn,
+                    Right: var lquery
+                }
+                    when ltreeColumn.TableAlias == tableAlias:
                 {
                     return BuildSimplifiedShapedQuery(
                         source,
                         new PgBinaryExpression(
                             PgExpressionType.LTreeFirstMatches,
-                            _sqlExpressionFactory.ApplyDefaultTypeMapping(GetArray(sourceTable)),
+                            _sqlExpressionFactory.ApplyDefaultTypeMapping(array),
                             lquery,
                             typeof(LTree),
                             _typeMappingSource.FindMapping(typeof(LTree))));
@@ -907,39 +848,27 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     {
         // Translate Skip over array to the PostgreSQL slice operator (array.Skip(2) -> array[3,])
         // Note that we have unnest over multiranges, not just arrays - but multiranges don't support subscripting/slicing.
-        if (source.QueryExpression is SelectExpression
-            {
-                Tables: [PgUnnestExpression { Array: var array } unnestExpression],
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Orderings: [],
-                Limit: null,
-                Offset: null
-            }
-            && IsPostgresArray(array)
-            && TryGetProjectedColumn(source, out var projectedColumn)
+        if (source.TryExtractArray(out var array, out var projectedColumn)
             && TranslateExpression(count) is { } translatedCount)
         {
-#pragma warning disable EF1001 // Internal EF Core API usage.
+#pragma warning disable EF1001 // SelectExpression constructors are currently internal
+            var tableAlias = ((SelectExpression)source.QueryExpression).Tables[0].Alias!;
             var selectExpression = new SelectExpression(
-                new PgUnnestExpression(
-                    unnestExpression.Alias,
-                    _sqlExpressionFactory.ArraySlice(
-                        array,
-                        lowerBound: GenerateOneBasedIndexExpression(translatedCount),
-                        upperBound: null,
-                        projectedColumn.IsNullable),
-                    "value"),
-                "value",
-                projectedColumn.Type,
-                projectedColumn.TypeMapping,
-                isColumnNullable: projectedColumn.IsNullable,
-                // isColumnNullable: /*projectedColumn.IsNullable*/ true, // TODO: This fails because of a shaper check
-                identifierColumnName: "ordinality",
-                identifierColumnType: typeof(int),
-                identifierColumnTypeMapping: _typeMappingSource.FindMapping(typeof(int)));
-#pragma warning restore EF1001 // Internal EF Core API usage.
+                [
+                    new PgUnnestExpression(
+                        tableAlias,
+                        _sqlExpressionFactory.ArraySlice(
+                            array,
+                            lowerBound: GenerateOneBasedIndexExpression(translatedCount),
+                            upperBound: null,
+                            // isColumnNullable: /*projectedColumn.IsNullable*/ true, // TODO: This fails because of a shaper check
+                            projectedColumn.IsNullable),
+                        "value"),
+                ],
+                new ColumnExpression("value", tableAlias, projectedColumn.Type, projectedColumn.TypeMapping, projectedColumn.IsNullable),
+                identifier: [GenerateOrdinalityIdentifier(tableAlias)],
+                _queryCompilationContext.SqlAliasManager);
+#pragma warning restore EF1001
 
             // TODO: Simplify by using UpdateQueryExpression after https://github.com/dotnet/efcore/issues/31511
             Expression shaperExpression = new ProjectionBindingExpression(
@@ -970,25 +899,9 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
     {
         // Translate Take over array to the PostgreSQL slice operator (array.Take(2) -> array[,2])
         // Note that we have unnest over multiranges, not just arrays - but multiranges don't support subscripting/slicing.
-        if (source.QueryExpression is SelectExpression
-            {
-                Tables: [PgUnnestExpression { Array: var array } unnestExpression],
-                GroupBy: [],
-                Having: null,
-                IsDistinct: false,
-                Orderings: [],
-                Limit: null,
-                Offset: null
-            }
-            && IsPostgresArray(array)
-            && TryGetProjectedColumn(source, out var projectedColumn))
+        if (source.TryExtractArray(out var array, out var projectedColumn)
+            && TranslateExpression(count) is { } translatedCount)
         {
-            var translatedCount = TranslateExpression(count);
-            if (translatedCount == null)
-            {
-                return base.TranslateTake(source, count);
-            }
-
             PgArraySliceExpression sliceExpression;
 
             // If Skip has been called before, an array slice expression is already there; try to integrate this Take into it.
@@ -1027,16 +940,13 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                     projectedColumn.IsNullable);
             }
 
-#pragma warning disable EF1001 // Internal EF Core API usage.
+#pragma warning disable EF1001 // SelectExpression constructors are currently internal
+            var tableAlias = ((SelectExpression)source.QueryExpression).Tables[0].Alias!;
             var selectExpression = new SelectExpression(
-                new PgUnnestExpression(unnestExpression.Alias, sliceExpression, "value"),
-                "value",
-                projectedColumn.Type,
-                projectedColumn.TypeMapping,
-                isColumnNullable: projectedColumn.IsNullable,
-                identifierColumnName: "ordinality",
-                identifierColumnType: typeof(int),
-                identifierColumnTypeMapping: _typeMappingSource.FindMapping(typeof(int)));
+                [new PgUnnestExpression(tableAlias, sliceExpression, "value")],
+                new ColumnExpression("value", tableAlias, projectedColumn.Type, projectedColumn.TypeMapping, projectedColumn.IsNullable),
+                [GenerateOrdinalityIdentifier(tableAlias)],
+                _queryCompilationContext.SqlAliasManager);
 #pragma warning restore EF1001 // Internal EF Core API usage.
 
             // TODO: Simplify by using UpdateQueryExpression after https://github.com/dotnet/efcore/issues/31511
@@ -1057,6 +967,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
 
         return base.TranslateTake(source, count);
     }
+
 
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
@@ -1145,11 +1056,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 var entityProjectionExpression =
                     (StructuralTypeProjectionExpression)selectExpression.GetProjection(projectionBindingExpression);
                 var column = entityProjectionExpression.BindProperty(shaper.StructuralType.GetProperties().First());
-                table = column.Table;
-                if (table is JoinExpressionBase joinExpressionBase)
-                {
-                    table = joinExpressionBase.Table;
-                }
+                table = selectExpression.Tables.Select(t => t.UnwrapJoin()).Single(t => t.Alias == column.TableAlias);
             }
 
             if (table is TableExpression te)
@@ -1162,6 +1069,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
         tableExpression = null;
         return false;
     }
+
 
     // PostgreSQL unnest is guaranteed to return output rows in the same order as its input array,
     // https://www.postgresql.org/docs/current/functions-array.html.
@@ -1207,6 +1115,13 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
         return false;
     }
 
+    private (ColumnExpression, ValueComparer) GenerateOrdinalityIdentifier(string tableAlias)
+    {
+        _ordinalityTypeMapping ??= _typeMappingSource.FindMapping("int")!;
+        return (new ColumnExpression("ordinality", tableAlias, typeof(int), _ordinalityTypeMapping, nullable: false),
+            _ordinalityTypeMapping.Comparer);
+    }
+
     /// <summary>
     ///     PostgreSQL array indexing is 1-based. If the index happens to be a constant, just increment it. Otherwise, append a +1 in the
     ///     SQL.
@@ -1216,57 +1131,19 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
             ? _sqlExpressionFactory.Constant(Convert.ToInt32(constant.Value) + 1, constant.TypeMapping)
             : _sqlExpressionFactory.Add(expression, _sqlExpressionFactory.Constant(1));
 
+#pragma warning disable EF1001 // SelectExpression constructors are currently internal
     private ShapedQueryExpression BuildSimplifiedShapedQuery(ShapedQueryExpression source, SqlExpression translation)
         => source.Update(
-            _sqlExpressionFactory.Select(translation),
+            new SelectExpression(translation, _queryCompilationContext.SqlAliasManager),
             Expression.Convert(
                 new ProjectionBindingExpression(translation, new ProjectionMember(), typeof(bool?)), typeof(bool)));
+#pragma warning restore EF1001
 
-    /// <summary>
-    ///     Extracts the <see cref="PgUnnestExpression.Array" /> out of <see cref="PgUnnestExpression" />.
-    ///     If a <see cref="ValuesExpression" /> is given, converts its literal values into a <see cref="PgNewArrayExpression" />.
-    /// </summary>
-    private SqlExpression GetArray(TableExpressionBase tableExpression)
+
+
+    private sealed class OuterReferenceFindingExpressionVisitor(TableExpression mainTable) : ExpressionVisitor
     {
-        Check.DebugAssert(
-            tableExpression is PgUnnestExpression or ValuesExpression { ColumnNames: ["_ord", "Value"] },
-            "Bad tableExpression");
-
-        switch (tableExpression)
-        {
-            case PgUnnestExpression unnest:
-                return unnest.Array;
-
-            case ValuesExpression valuesExpression:
-            {
-                // The source table was a constant collection, so translated by default to ValuesExpression. Convert it to an unnest over
-                // an array constructor.
-                var elements = new SqlExpression[valuesExpression.RowValues.Count];
-
-                for (var i = 0; i < elements.Length; i++)
-                {
-                    // Skip the first column (_ord) and copy the second (Value)
-                    elements[i] = valuesExpression.RowValues[i].Values[1];
-                }
-
-                return new PgNewArrayExpression(
-                    elements, valuesExpression.RowValues[0].Values[1].Type.MakeArrayType(), typeMapping: null);
-            }
-
-            default:
-                throw new ArgumentException(nameof(tableExpression));
-        }
-    }
-
-    private sealed class OuterReferenceFindingExpressionVisitor : ExpressionVisitor
-    {
-        private readonly TableExpression _mainTable;
         private bool _containsReference;
-
-        public OuterReferenceFindingExpressionVisitor(TableExpression mainTable)
-        {
-            _mainTable = mainTable;
-        }
 
         public bool ContainsReferenceToMainTable(TableExpressionBase tableExpression)
         {
@@ -1285,8 +1162,7 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
                 return expression;
             }
 
-            if (expression is ColumnExpression columnExpression
-                && columnExpression.Table == _mainTable)
+            if (expression is ColumnExpression { TableAlias: var tableAlias } && tableAlias == mainTable.Alias)
             {
                 _containsReference = true;
 
@@ -1294,64 +1170,6 @@ public class GaussDBQueryableMethodTranslatingExpressionVisitor : RelationalQuer
             }
 
             return base.Visit(expression);
-        }
-    }
-
-    /// <summary>
-    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-    ///     any release. You should only use it directly in your code with extreme caution and knowing that
-    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-    /// </summary>
-    protected class GaussDBInferredTypeMappingApplier : RelationalInferredTypeMappingApplier
-    {
-        private readonly GaussDBTypeMappingSource _typeMappingSource;
-        private readonly GaussDBSqlExpressionFactory _sqlExpressionFactory;
-
-        /// <summary>
-        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-        ///     any release. You should only use it directly in your code with extreme caution and knowing that
-        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-        /// </summary>
-        public GaussDBInferredTypeMappingApplier(
-            IModel model,
-            GaussDBTypeMappingSource typeMappingSource,
-            GaussDBSqlExpressionFactory sqlExpressionFactory,
-            IReadOnlyDictionary<(TableExpressionBase, string), RelationalTypeMapping?> inferredTypeMappings)
-            : base(model, sqlExpressionFactory, inferredTypeMappings)
-        {
-            _typeMappingSource = typeMappingSource;
-            _sqlExpressionFactory = sqlExpressionFactory;
-        }
-
-        /// <summary>
-        ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-        ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-        ///     any release. You should only use it directly in your code with extreme caution and knowing that
-        ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-        /// </summary>
-        protected override Expression VisitExtension(Expression expression)
-        {
-            switch (expression)
-            {
-                case PgUnnestExpression unnestExpression
-                    when TryGetInferredTypeMapping(unnestExpression, unnestExpression.ColumnName, out var elementTypeMapping):
-                {
-                    var collectionTypeMapping = _typeMappingSource.FindMapping(unnestExpression.Array.Type, Model, elementTypeMapping);
-
-                    if (collectionTypeMapping is null)
-                    {
-                        throw new InvalidOperationException(RelationalStrings.NullTypeMappingInSqlTree(expression.Print()));
-                    }
-
-                    return unnestExpression.Update(
-                        _sqlExpressionFactory.ApplyTypeMapping(unnestExpression.Array, collectionTypeMapping));
-                }
-
-                default:
-                    return base.VisitExtension(expression);
-            }
         }
     }
 }

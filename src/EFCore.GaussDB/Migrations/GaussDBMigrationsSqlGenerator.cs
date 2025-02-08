@@ -902,7 +902,7 @@ public class GaussDBMigrationsSqlGenerator : MigrationsSqlGenerator
     }
 
     /// <inheritdoc />
-    protected override void IndexOptions(CreateIndexOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    protected override void IndexOptions(MigrationOperation operation, IModel? model, MigrationCommandListBuilder builder)
     {
         if (_postgresVersion.AtLeast(11) && operation[GaussDBAnnotationNames.IndexInclude] is string[] { Length: > 0 } includeColumns)
         {
@@ -921,7 +921,7 @@ public class GaussDBMigrationsSqlGenerator : MigrationsSqlGenerator
 
         base.IndexOptions(operation, model, builder);
     }
-
+ 
     /// <inheritdoc />
     protected override void Generate(EnsureSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder)
     {

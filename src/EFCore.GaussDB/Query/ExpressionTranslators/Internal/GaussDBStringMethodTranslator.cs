@@ -15,28 +15,28 @@ public class GaussDBStringMethodTranslator : IMethodCallTranslator
 {
     private readonly ISqlExpressionFactory _sqlExpressionFactory;
     private readonly IRelationalTypeMappingSource _typeMappingSource;
-    private readonly SqlConstantExpression _whitespace;
+    private readonly SqlExpression _whitespace;
 
     #region MethodInfo
 
-    private static readonly MethodInfo IndexOfChar = typeof(string).GetRuntimeMethod(nameof(string.IndexOf), new[] { typeof(char) })!;
-    private static readonly MethodInfo IndexOfString = typeof(string).GetRuntimeMethod(nameof(string.IndexOf), new[] { typeof(string) })!;
+    private static readonly MethodInfo IndexOfChar = typeof(string).GetRuntimeMethod(nameof(string.IndexOf), [typeof(char)])!;
+    private static readonly MethodInfo IndexOfString = typeof(string).GetRuntimeMethod(nameof(string.IndexOf), [typeof(string)])!;
 
     private static readonly MethodInfo IsNullOrWhiteSpace =
-        typeof(string).GetRuntimeMethod(nameof(string.IsNullOrWhiteSpace), new[] { typeof(string) })!;
+        typeof(string).GetRuntimeMethod(nameof(string.IsNullOrWhiteSpace), [typeof(string)])!;
 
-    private static readonly MethodInfo PadLeft = typeof(string).GetRuntimeMethod(nameof(string.PadLeft), new[] { typeof(int) })!;
+    private static readonly MethodInfo PadLeft = typeof(string).GetRuntimeMethod(nameof(string.PadLeft), [typeof(int)])!;
 
     private static readonly MethodInfo PadLeftWithChar = typeof(string).GetRuntimeMethod(
-        nameof(string.PadLeft), new[] { typeof(int), typeof(char) })!;
+        nameof(string.PadLeft), [typeof(int), typeof(char)])!;
 
-    private static readonly MethodInfo PadRight = typeof(string).GetRuntimeMethod(nameof(string.PadRight), new[] { typeof(int) })!;
+    private static readonly MethodInfo PadRight = typeof(string).GetRuntimeMethod(nameof(string.PadRight), [typeof(int)])!;
 
     private static readonly MethodInfo PadRightWithChar = typeof(string).GetRuntimeMethod(
-        nameof(string.PadRight), new[] { typeof(int), typeof(char) })!;
+        nameof(string.PadRight), [typeof(int), typeof(char)])!;
 
     private static readonly MethodInfo Replace = typeof(string).GetRuntimeMethod(
-        nameof(string.Replace), new[] { typeof(string), typeof(string) })!;
+        nameof(string.Replace), [typeof(string), typeof(string)])!;
 
     private static readonly MethodInfo Substring = typeof(string).GetTypeInfo().GetDeclaredMethods(nameof(string.Substring))
         .Single(m => m.GetParameters().Length == 1);
@@ -44,38 +44,44 @@ public class GaussDBStringMethodTranslator : IMethodCallTranslator
     private static readonly MethodInfo SubstringWithLength = typeof(string).GetTypeInfo().GetDeclaredMethods(nameof(string.Substring))
         .Single(m => m.GetParameters().Length == 2);
 
-    private static readonly MethodInfo ToLower = typeof(string).GetRuntimeMethod(nameof(string.ToLower), Array.Empty<Type>())!;
-    private static readonly MethodInfo ToUpper = typeof(string).GetRuntimeMethod(nameof(string.ToUpper), Array.Empty<Type>())!;
+    private static readonly MethodInfo ToLower = typeof(string).GetRuntimeMethod(nameof(string.ToLower), [])!;
+    private static readonly MethodInfo ToUpper = typeof(string).GetRuntimeMethod(nameof(string.ToUpper), [])!;
     private static readonly MethodInfo TrimBothWithNoParam = typeof(string).GetRuntimeMethod(nameof(string.Trim), Type.EmptyTypes)!;
-    private static readonly MethodInfo TrimBothWithChars = typeof(string).GetRuntimeMethod(nameof(string.Trim), new[] { typeof(char[]) })!;
+    private static readonly MethodInfo TrimBothWithChars = typeof(string).GetRuntimeMethod(nameof(string.Trim), [typeof(char[])])!;
 
     private static readonly MethodInfo TrimBothWithSingleChar =
-        typeof(string).GetRuntimeMethod(nameof(string.Trim), new[] { typeof(char) })!;
+        typeof(string).GetRuntimeMethod(nameof(string.Trim), [typeof(char)])!;
 
     private static readonly MethodInfo TrimEndWithNoParam = typeof(string).GetRuntimeMethod(nameof(string.TrimEnd), Type.EmptyTypes)!;
 
     private static readonly MethodInfo TrimEndWithChars = typeof(string).GetRuntimeMethod(
-        nameof(string.TrimEnd), new[] { typeof(char[]) })!;
+        nameof(string.TrimEnd), [typeof(char[])])!;
 
     private static readonly MethodInfo TrimEndWithSingleChar =
-        typeof(string).GetRuntimeMethod(nameof(string.TrimEnd), new[] { typeof(char) })!;
+        typeof(string).GetRuntimeMethod(nameof(string.TrimEnd), [typeof(char)])!;
 
     private static readonly MethodInfo TrimStartWithNoParam = typeof(string).GetRuntimeMethod(nameof(string.TrimStart), Type.EmptyTypes)!;
 
     private static readonly MethodInfo TrimStartWithChars =
-        typeof(string).GetRuntimeMethod(nameof(string.TrimStart), new[] { typeof(char[]) })!;
+        typeof(string).GetRuntimeMethod(nameof(string.TrimStart), [typeof(char[])])!;
 
     private static readonly MethodInfo TrimStartWithSingleChar =
-        typeof(string).GetRuntimeMethod(nameof(string.TrimStart), new[] { typeof(char) })!;
+        typeof(string).GetRuntimeMethod(nameof(string.TrimStart), [typeof(char)])!;
 
     private static readonly MethodInfo Reverse = typeof(GaussDBDbFunctionsExtensions).GetRuntimeMethod(
-        nameof(GaussDBDbFunctionsExtensions.Reverse), new[] { typeof(DbFunctions), typeof(string) })!;
+        nameof(GaussDBDbFunctionsExtensions.Reverse), [typeof(DbFunctions), typeof(string)])!;
 
     private static readonly MethodInfo StringToArray = typeof(GaussDBDbFunctionsExtensions).GetRuntimeMethod(
-        nameof(GaussDBDbFunctionsExtensions.StringToArray), new[] { typeof(DbFunctions), typeof(string), typeof(string) })!;
+        nameof(GaussDBDbFunctionsExtensions.StringToArray), [typeof(DbFunctions), typeof(string), typeof(string)])!;
 
     private static readonly MethodInfo StringToArrayNullString = typeof(GaussDBDbFunctionsExtensions).GetRuntimeMethod(
-        nameof(GaussDBDbFunctionsExtensions.StringToArray), new[] { typeof(DbFunctions), typeof(string), typeof(string), typeof(string) })!;
+        nameof(GaussDBDbFunctionsExtensions.StringToArray), [typeof(DbFunctions), typeof(string), typeof(string), typeof(string)])!;
+
+    private static readonly MethodInfo ToDate = typeof(GaussDBDbFunctionsExtensions).GetRuntimeMethod(
+        nameof(GaussDBDbFunctionsExtensions.ToDate), [typeof(DbFunctions), typeof(string), typeof(string)])!;
+
+    private static readonly MethodInfo ToTimestamp = typeof(GaussDBDbFunctionsExtensions).GetRuntimeMethod(
+        nameof(GaussDBDbFunctionsExtensions.ToTimestamp), [typeof(DbFunctions), typeof(string), typeof(string)])!;
 
     private static readonly MethodInfo FirstOrDefaultMethodInfoWithoutArgs
         = typeof(Enumerable).GetRuntimeMethods().Single(
@@ -89,16 +95,19 @@ public class GaussDBStringMethodTranslator : IMethodCallTranslator
 
     // ReSharper disable InconsistentNaming
     private static readonly MethodInfo String_Join1 =
-        typeof(string).GetMethod(nameof(string.Join), new[] { typeof(string), typeof(object[]) })!;
+        typeof(string).GetMethod(nameof(string.Join), [typeof(string), typeof(object[])])!;
 
     private static readonly MethodInfo String_Join2 =
-        typeof(string).GetMethod(nameof(string.Join), new[] { typeof(string), typeof(string[]) })!;
+        typeof(string).GetMethod(nameof(string.Join), [typeof(string), typeof(string[])])!;
 
     private static readonly MethodInfo String_Join3 =
-        typeof(string).GetMethod(nameof(string.Join), new[] { typeof(char), typeof(object[]) })!;
+        typeof(string).GetMethod(nameof(string.Join), [typeof(char), typeof(object[])])!;
 
     private static readonly MethodInfo String_Join4 =
-        typeof(string).GetMethod(nameof(string.Join), new[] { typeof(char), typeof(string[]) })!;
+        typeof(string).GetMethod(nameof(string.Join), [typeof(char), typeof(string[])])!;
+
+    private static readonly MethodInfo String_Join5 =
+        typeof(string).GetMethod(nameof(string.Join), [typeof(string), typeof(IEnumerable<string>)])!;
 
     private static readonly MethodInfo String_Join_generic1 =
         typeof(string).GetTypeInfo().GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
