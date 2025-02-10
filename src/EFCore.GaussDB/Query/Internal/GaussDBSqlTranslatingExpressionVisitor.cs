@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -391,7 +392,7 @@ public class GaussDBSqlTranslatingExpressionVisitor : RelationalSqlTranslatingEx
         [NotNullWhen(true)] out SqlExpression? translation)
     {
         if (Visit(instance) is not SqlExpression translatedInstance
-            || Visit(pattern) is not SqlExpression translatedPattern)
+          || Visit(pattern) is not SqlExpression translatedPattern)
         {
             translation = null;
             return false;
@@ -410,7 +411,9 @@ public class GaussDBSqlTranslatingExpressionVisitor : RelationalSqlTranslatingEx
                 // simple LIKE
                 translation = patternConstant.Value switch
                 {
-                    null => _sqlExpressionFactory.Like(translatedInstance, _sqlExpressionFactory.Constant(null, stringTypeMapping)),
+                    null => _sqlExpressionFactory.Like(
+                        translatedInstance,
+                        _sqlExpressionFactory.Constant(null, typeof(string), stringTypeMapping)),
 
                     // In .NET, all strings start with/end with/contain the empty string, but SQL LIKE return false for empty patterns.
                     // Return % which always matches instead.
@@ -436,8 +439,7 @@ public class GaussDBSqlTranslatingExpressionVisitor : RelationalSqlTranslatingEx
                 return true;
             }
 
-            case SqlParameterExpression patternParameter
-                when patternParameter.Name.StartsWith(QueryCompilationContext.QueryParameterPrefix, StringComparison.Ordinal):
+            case SqlParameterExpression patternParameter:
             {
                 // The pattern is a parameter, register a runtime parameter that will contain the rewritten LIKE pattern, where
                 // all special characters have been escaped.
@@ -450,12 +452,12 @@ public class GaussDBSqlTranslatingExpressionVisitor : RelationalSqlTranslatingEx
                     QueryCompilationContext.QueryContextParameter);
 
                 var escapedPatternParameter =
-                    _queryCompilationContext.RegisterRuntimeParameter(patternParameter.Name + "_rewritten", lambda);
+                    _queryCompilationContext.RegisterRuntimeParameter(
+                        $"{patternParameter.Name}_{methodType.ToString().ToLower(CultureInfo.InvariantCulture)}", lambda);
 
                 translation = _sqlExpressionFactory.Like(
                     translatedInstance,
-                    new SqlParameterExpression(escapedPatternParameter.Name!, escapedPatternParameter.Type, stringTypeMapping),
-                    _sqlExpressionFactory.Constant(LikeEscapeChar.ToString()));
+                    new SqlParameterExpression(escapedPatternParameter.Name!, escapedPatternParameter.Type, stringTypeMapping));
 
                 return true;
             }
@@ -472,13 +474,12 @@ public class GaussDBSqlTranslatingExpressionVisitor : RelationalSqlTranslatingEx
                         translation =
                             _sqlExpressionFactory.Function(
                                 methodType is StartsEndsWithContains.StartsWith ? "left" : "right",
-                                new[]
-                                {
+                                [
                                     translatedInstance,
                                     _sqlExpressionFactory.Function(
-                                        "length", new[] { translatedPattern }, nullable: true,
-                                        argumentsPropagateNullability: new[] { true }, typeof(int))
-                                }, nullable: true, argumentsPropagateNullability: new[] { true, true }, typeof(string),
+                                        "length", [translatedPattern], nullable: true,
+                                        argumentsPropagateNullability: [true], typeof(int))
+                                ], nullable: true, argumentsPropagateNullability: [true, true], typeof(string),
                                 stringTypeMapping);
 
                         // LEFT/RIGHT of a citext return a text, so for non-default text mappings we apply an explicit cast.
@@ -508,8 +509,8 @@ public class GaussDBSqlTranslatingExpressionVisitor : RelationalSqlTranslatingEx
                                     _sqlExpressionFactory.IsNotNull(translatedPattern),
                                     _sqlExpressionFactory.GreaterThan(
                                         _sqlExpressionFactory.Function(
-                                            "strpos", new[] { translatedInstance, translatedPattern }, nullable: true,
-                                            argumentsPropagateNullability: new[] { true, true }, typeof(int)),
+                                            "strpos", [translatedInstance, translatedPattern], nullable: true,
+                                            argumentsPropagateNullability: [true, true], typeof(int)),
                                         _sqlExpressionFactory.Constant(0))));
                         break;
 

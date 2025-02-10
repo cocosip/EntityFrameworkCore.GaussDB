@@ -46,7 +46,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\GaussDB\src\GaussDB\GaussDB.csproj" />
+    <ProjectReference Include="..\..\..\DotNetCore.GaussDB\src\GaussDB\GaussDB.csproj" />
   </ItemGroup>
 
 </Project>

@@ -34,5 +34,8 @@ public class GaussDBQueryTranslationPostprocessorFactory : IQueryTranslationPost
 
     /// <inheritdoc />
     public virtual QueryTranslationPostprocessor Create(QueryCompilationContext queryCompilationContext)
-        => new GaussDBQueryTranslationPostprocessor(Dependencies, RelationalDependencies, queryCompilationContext);
+        => new GaussDBQueryTranslationPostprocessor(
+            Dependencies,
+            RelationalDependencies,
+            (RelationalQueryCompilationContext)queryCompilationContext);
 }
